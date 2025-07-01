@@ -2,8 +2,10 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>Advanced Agar.io Clone</title>
+    <!-- NippleJS (Virtual Joystick) Library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/nipplejs/0.10.1/nipplejs.min.js"></script>
     <style>
         body { margin: 0; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #1a1a1a; }
         canvas { display: block; background-color: #282828; }
@@ -21,47 +23,20 @@
         .controls strong { color: #333; }
 
         /* --- MOBILE CONTROLS CSS --- */
-        #mobile-controls {
-            display: none; /* 데스크톱에서는 기본적으로 숨김 */
-        }
-        .mobile-button {
-            position: fixed;
-            width: 65px;
-            height: 65px;
-            background-color: rgba(0, 0, 0, 0.4);
-            border: 2px solid rgba(255, 255, 255, 0.5);
-            border-radius: 50%;
-            color: white;
-            font-size: 16px;
-            font-weight: bold;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            cursor: pointer;
-            user-select: none; /* 롱클릭 시 텍스트 선택 방지 */
-            z-index: 20;
-        }
-        .mobile-button:active {
-            background-color: rgba(0, 0, 0, 0.6);
-        }
-        #split-button {
-            bottom: 25px;
-            right: 25px;
-        }
-        #eject-button {
-            bottom: 25px;
-            left: 25px;
-        }
-        /* 터치 기기에서만 컨트롤 버튼을 보여줌 */
+        #mobile-controls { display: none; }
+        .mobile-button { position: fixed; width: 65px; height: 65px; background-color: rgba(0, 0, 0, 0.4); border: 2px solid rgba(255, 255, 255, 0.5); border-radius: 50%; color: white; font-size: 16px; font-weight: bold; display: flex; justify-content: center; align-items: center; cursor: pointer; user-select: none; z-index: 20; }
+        .mobile-button:active { background-color: rgba(0, 0, 0, 0.6); }
+        #split-button { bottom: 90px; right: 25px; }
+        #eject-button { bottom: 25px; right: 90px; }
+        
+        #joystick-zone { position: fixed; bottom: 0; left: 0; width: 150px; height: 150px; z-index: 20; }
+        
         @media (hover: none) and (pointer: coarse) {
-            #mobile-controls {
-                display: block;
-            }
+            #mobile-controls { display: block; }
         }
     </style>
 </head>
 <body>
-
     <div id="start-screen" class="overlay">
         <h1>Advanced Agar.io</h1>
         <p>더 똑똑하고, 더 빠르게 움직이세요!</p>
@@ -71,22 +46,20 @@
             <strong>Space:</strong> 분열     <strong>W:</strong> 먹이 뱉기
         </div>
     </div>
-
     <div id="death-screen" class="overlay" style="display: none;">
         <h1>Game Over!</h1>
         <p>당신의 최종 점수: <strong id="final-score">0</strong></p>
         <button id="respawn-button" class="action-button">다시하기</button>
     </div>
-
     <div id="leaderboard" style="display: none;">
         <h2>리더보드</h2>
         <ol id="leaderboard-list"></ol>
     </div>
-
     <canvas id="game-canvas"></canvas>
 
     <!-- MOBILE CONTROLS HTML -->
     <div id="mobile-controls">
+        <div id="joystick-zone"></div>
         <div id="eject-button" class="mobile-button">뱉기</div>
         <div id="split-button" class="mobile-button">분열</div>
     </div>
@@ -96,7 +69,7 @@
         import { initializeApp } from "https://www.gstatic.com/firebasejs/9.6.1/firebase-app.js";
         import { getDatabase, ref, set, onValue, onDisconnect, remove, runTransaction } from "https://www.gstatic.com/firebasejs/9.6.1/firebase-database.js";
 
-        // Firebase Config
+        // Firebase Config (Your config here)
         const firebaseConfig = {
           apiKey: "AIzaSyDEGeOQYpRA3NHmNFxh7wXGLnYF8mCNWpQ",
           authDomain: "agar-7f7ca.firebaseapp.com",
@@ -119,9 +92,9 @@
         const leaderboard = document.getElementById('leaderboard');
         const leaderboardList = document.getElementById('leaderboard-list');
         const finalScoreEl = document.getElementById('final-score');
-        // Mobile Controls
         const splitButton = document.getElementById('split-button');
         const ejectButton = document.getElementById('eject-button');
+        const joystickZone = document.getElementById('joystick-zone');
 
         // Game Constants
         const GAME_WIDTH = 7000;
@@ -145,6 +118,7 @@
         let isGameRunning = false;
         let hasInitialized = false;
         let mouse = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+        let joystickAngle = null; // Joystick state
         let disconnectRef = null;
         let currentScale = 1;
 
@@ -155,21 +129,20 @@
         window.addEventListener('mousemove', (event) => { mouse.x = event.clientX; mouse.y = event.clientY; });
         window.addEventListener('keydown', handleKeyDown);
 
-        // 모바일 터치 이벤트 리스너 추가
-        splitButton.addEventListener('touchstart', (e) => {
-            e.preventDefault(); // 기본 터치 동작(줌 등) 방지
-            handleKeyDown({ code: 'Space' }); // Space 키를 누른 것처럼 처리
-        });
-        ejectButton.addEventListener('touchstart', (e) => {
-            e.preventDefault();
-            handleKeyDown({ code: 'KeyW' }); // W 키를 누른 것처럼 처리
-        });
-
-
+        splitButton.addEventListener('touchstart', (e) => { e.preventDefault(); handleKeyDown({ code: 'Space' }); });
+        ejectButton.addEventListener('touchstart', (e) => { e.preventDefault(); handleKeyDown({ code: 'KeyW' }); });
+        
         startButton.addEventListener('click', startGame);
         respawnButton.addEventListener('click', respawn);
         playerNameInput.addEventListener('keyup', (e) => { if (e.key === 'Enter') startGame(); });
         
+        function initializeJoystick() {
+            const options = { zone: joystickZone, mode: 'static', position: { left: '75px', bottom: '75px' }, color: 'white' };
+            const manager = nipplejs.create(options);
+            manager.on('move', (evt, data) => { joystickAngle = data.angle.radian; });
+            manager.on('end', () => { joystickAngle = null; });
+        }
+
         function startGame() {
             const playerName = playerNameInput.value.trim();
             if (!playerName) { alert('닉네임을 입력해주세요!'); return; }
@@ -177,6 +150,7 @@
             if (!hasInitialized) {
                 generateStaticFood();
                 setupFirebaseListeners();
+                initializeJoystick(); // Initialize joystick with other setup
                 hasInitialized = true;
             }
             initializePlayer();
@@ -206,12 +180,8 @@
             deathScreen.style.display = 'none';
             leaderboard.style.display = 'block';
             localPlayerId = `player_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-            
             const cellId = `cell_${Date.now()}`;
-            const playerData = {
-                id: localPlayerId, name: localPlayerName, color: getRandomColor(),
-                cells: { [cellId]: { id: cellId, x: Math.random() * GAME_WIDTH, y: Math.random() * GAME_HEIGHT, size: INITIAL_PLAYER_SIZE, vx: 0, vy: 0 } }
-            };
+            const playerData = { id: localPlayerId, name: localPlayerName, color: getRandomColor(), cells: { [cellId]: { id: cellId, x: Math.random() * GAME_WIDTH, y: Math.random() * GAME_HEIGHT, size: INITIAL_PLAYER_SIZE, vx: 0, vy: 0 } } };
             const playerRef = ref(db, 'players/' + localPlayerId);
             set(playerRef, playerData);
             disconnectRef = onDisconnect(playerRef);
@@ -225,56 +195,64 @@
             return localPlayerId === Object.keys(players).sort()[0];
         }
 
-        const generateInitialViruses = () => {
-            const data = {};
-            for (let i = 0; i < VIRUS_COUNT; i++) {
-                const id = `virus_${i}_${Date.now()}`;
-                data[id] = { x: Math.random() * GAME_WIDTH, y: Math.random() * GAME_HEIGHT, size: 80 };
-            }
-            set(ref(db, 'viruses'), data);
-        };
-
         function runMasterClientTasks() {
             if (!isMasterClient()) return;
+            
+            // Virus & Ejected Mass Cleanup
             if (Object.keys(viruses).length < VIRUS_COUNT) {
                 const newId = `virus_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
                 set(ref(db, `viruses/${newId}`), { x: Math.random() * GAME_WIDTH, y: Math.random() * GAME_HEIGHT, size: 80 });
             }
             const now = Date.now();
             for (const massId in ejectedMass) {
-                if (now - (ejectedMass[massId].spawnTime || 0) > 20000) {
-                    remove(ref(db, `ejectedMass/${massId}`));
-                }
+                if (now - (ejectedMass[massId].spawnTime || 0) > 20000) remove(ref(db, `ejectedMass/${massId}`));
             }
+
+            // MODIFIED: Master Client is now responsible for merging ALL players' cells
+            runTransaction(ref(db, 'players'), (allPlayers) => {
+                if (!allPlayers) return allPlayers;
+                const now = Date.now();
+                for(const pId in allPlayers) {
+                    const pData = allPlayers[pId];
+                    if (!pData.cells || Object.keys(pData.cells).length <= 1) continue;
+                    
+                    const cells = Object.values(pData.cells);
+                    for (let i = 0; i < cells.length; i++) {
+                        for (let j = i + 1; j < cells.length; j++) {
+                            const c1 = cells[i], c2 = cells[j];
+                            if (!c1 || !c2) continue;
+                            const readyToMerge = now > (c1.mergeTime || 0) && now > (c2.mergeTime || 0);
+                            if (readyToMerge && Math.hypot(c1.x - c2.x, c1.y - c2.y) < (c1.size + c2.size) / 2) {
+                                c1.size = Math.sqrt(c1.size**2 + c2.size**2);
+                                delete pData.cells[c2.id];
+                                cells.splice(j, 1);
+                                j--;
+                            }
+                        }
+                    }
+                }
+                return allPlayers;
+            });
         }
 
         function setupFirebaseListeners() {
             onValue(ref(db, 'players'), (snapshot) => {
                 const serverPlayers = snapshot.val() || {};
                 if (isGameRunning && localPlayerId && !serverPlayers[localPlayerId] && players[localPlayerId]) {
-                    let finalScore = 0;
-                    if (players[localPlayerId] && players[localPlayerId].cells) {
-                         finalScore = Math.floor(Object.values(players[localPlayerId].cells).reduce((sum, cell) => sum + Math.sqrt(cell.size**2), 0));
-                    }
+                    const finalScore = Math.floor(Object.values(players[localPlayerId].cells || {}).reduce((sum, cell) => sum + Math.sqrt(cell.size**2), 0));
                     handleDeath(finalScore);
                 }
                 players = serverPlayers;
             });
-            onValue(ref(db, 'viruses'), (snapshot) => {
-                const data = snapshot.val();
-                if (data) { viruses = data; } 
-                else if (isMasterClient()) { generateInitialViruses(); }
-            });
+            onValue(ref(db, 'viruses'), (snapshot) => { viruses = snapshot.val() || {}; });
             onValue(ref(db, 'ejectedMass'), (snapshot) => { ejectedMass = snapshot.val() || {}; });
-            setInterval(runMasterClientTasks, 1000);
+            setInterval(runMasterClientTasks, 250); // Run tasks more frequently for smoother merges
         }
         
         function handleKeyDown(e) {
-            if (!isGameRunning || !localPlayerId || !players[localPlayerId]) return;
-            const me = players[localPlayerId];
-            if (!me || !me.cells) return;
-            if (e.code === 'Space' && Object.values(me.cells).some(c => c.size >= MIN_SPLIT_SIZE)) split();
-            if (e.code === 'KeyW' && Object.values(me.cells).some(c => c.size >= MIN_EJECT_SIZE)) ejectMass();
+            if (!isGameRunning || !localPlayerId || !players[localPlayerId] || !players[localPlayerId].cells) return;
+            if (e.code === 'Space' && Object.values(players[localPlayerId].cells).some(c => c.size >= MIN_SPLIT_SIZE)) split();
+            if (e.code === 'KeyW' && Object.values(players[localPlayerId].cells).some(c => c.size >= MIN_EJECT_SIZE)) ejectMass();
         }
 
         function update() {
@@ -287,18 +265,14 @@
 
             let totalSizeSq = 0, viewX = 0, viewY = 0;
             const cellCount = Object.keys(me.cells).length;
-           
             for (const cellId in me.cells) {
                 const cell = me.cells[cellId];
                 viewX += cell.x * cell.size;
                 viewY += cell.y * cell.size;
                 totalSizeSq += cell.size * cell.size;
             }
-            
             const totalSize = Math.sqrt(totalSizeSq);
-            let totalWeightedSize = 0;
-             Object.values(me.cells).forEach(c => totalWeightedSize += c.size);
-
+            let totalWeightedSize = Object.values(me.cells).reduce((sum, c) => sum + c.size, 0);
             if (totalWeightedSize > 0) {
                  me.viewX = viewX / totalWeightedSize;
                  me.viewY = viewY / totalWeightedSize;
@@ -307,13 +281,14 @@
             const targetScale = Math.pow(Math.min(1, 60 / totalSize), 0.4);
             currentScale += (targetScale - currentScale) * 0.1;
 
+            // MODIFIED: Use joystick angle if available, otherwise use mouse
+            const moveAngle = joystickAngle !== null ? joystickAngle : Math.atan2(mouse.y - canvas.height / 2, mouse.x - canvas.width / 2);
+
             for (const cellId in me.cells) {
                 const cell = me.cells[cellId];
-                const angleToMouse = Math.atan2(mouse.y - canvas.height / 2, mouse.x - canvas.width / 2);
                 const speed = 4 / Math.log1p(cell.size);
-                
-                let targetVX = Math.cos(angleToMouse) * speed;
-                let targetVY = Math.sin(angleToMouse) * speed;
+                let targetVX = Math.cos(moveAngle) * speed;
+                let targetVY = Math.sin(moveAngle) * speed;
 
                 if (cellCount > 1) {
                     const distToCenter = Math.hypot(cell.x - me.viewX, cell.y - me.viewY);
@@ -342,56 +317,22 @@
                     }
                 }
 
-                if (isNaN(cell.x) || isNaN(cell.y)) { cell.x = me.viewX; cell.y = me.viewY; cell.vx = 0; cell.vy = 0; }
                 cell.x = Math.max(cell.size, Math.min(GAME_WIDTH - cell.size, cell.x));
                 cell.y = Math.max(cell.size, Math.min(GAME_HEIGHT - cell.size, cell.y));
             }
             
             handleCollisions();
-            if (players[localPlayerId]) {
-                set(ref(db, 'players/' + localPlayerId), me);
-            }
+            if (players[localPlayerId]) set(ref(db, 'players/' + localPlayerId), me);
         }
         
         function handleCollisions() {
             const me = players[localPlayerId];
             if (!me || !me.cells) return;
 
-            runTransaction(ref(db, `players/${localPlayerId}`), (playerData) => {
-                if (!playerData || !playerData.cells) {
-                    return playerData;
-                }
-                
-                const cells = Object.values(playerData.cells);
-                if (cells.length <= 1) {
-                    return playerData;
-                }
-
-                for (let i = 0; i < cells.length; i++) {
-                    for (let j = i + 1; j < cells.length; j++) {
-                        const c1 = cells[i];
-                        const c2 = cells[j];
-                        
-                        if (!c1 || !c2) continue;
-
-                        const readyToMerge = Date.now() > (c1.mergeTime || 0) && Date.now() > (c2.mergeTime || 0);
-                        if (!readyToMerge) continue;
-
-                        if (Math.hypot(c1.x - c2.x, c1.y - c2.y) < (c1.size + c2.size) / 2) {
-                            c1.size = Math.sqrt(c1.size**2 + c2.size**2);
-                            delete playerData.cells[c2.id];
-                            cells.splice(j, 1);
-                            j--;
-                        }
-                    }
-                }
-                return playerData;
-            });
-
+            // Food and ejected mass collision (client-side for responsiveness)
             for (const cellId in me.cells) {
                 const cell = me.cells[cellId];
                 if (!cell) continue;
-
                 for (let i = staticFood.length - 1; i >= 0; i--) {
                     const item = staticFood[i];
                     if (Math.hypot(cell.x - item.x, cell.y - item.y) < cell.size) {
@@ -399,7 +340,6 @@
                         staticFood.splice(i, 1);
                     }
                 }
-                
                 for (const id in ejectedMass) {
                     const item = ejectedMass[id];
                     if (Math.hypot(cell.x - item.x, cell.y - item.y) < cell.size) {
@@ -409,30 +349,27 @@
                 }
             }
             
+            // Player vs Player collision
             for (const myCellId in me.cells) {
                 const myCell = me.cells[myCellId];
                 for (const otherPlayerId in players) {
                     if (otherPlayerId === localPlayerId) continue;
                     const otherPlayer = players[otherPlayerId];
                     if (!otherPlayer.cells) continue;
-
                     for (const otherCellId in otherPlayer.cells) {
                         const otherCell = otherPlayer.cells[otherCellId];
                         const dist = Math.hypot(myCell.x - otherCell.x, myCell.y - otherCell.y);
                         if (dist < myCell.size && myCell.size > otherCell.size * 1.1) {
-                            runTransaction(ref(db), (dbData) => {
-                                if (!dbData || !dbData.players) return dbData;
-                                const currentMe = dbData.players[localPlayerId];
-                                const currentOther = dbData.players[otherPlayerId];
-                                if (!currentMe || !currentMe.cells || !currentMe.cells[myCellId] || !currentOther || !currentOther.cells || !currentOther.cells[otherCellId]) {
-                                    return;
-                                }
+                            runTransaction(ref(db, 'players'), (allPlayers) => {
+                                if (!allPlayers) return allPlayers;
+                                const currentMe = allPlayers[localPlayerId];
+                                const currentOther = allPlayers[otherPlayerId];
+                                if (!currentMe?.cells?.[myCellId] || !currentOther?.cells?.[otherCellId]) return;
+                                
                                 currentMe.cells[myCellId].size = Math.sqrt(currentMe.cells[myCellId].size**2 + currentOther.cells[otherCellId].size**2);
                                 delete currentOther.cells[otherCellId];
-                                if (Object.keys(currentOther.cells).length === 0) {
-                                    delete dbData.players[otherPlayerId];
-                                }
-                                return dbData;
+                                if (Object.keys(currentOther.cells).length === 0) delete allPlayers[otherPlayerId];
+                                return allPlayers;
                             });
                         }
                     }
@@ -440,20 +377,17 @@
             }
         }
 
-
         function draw(){
             ctx.clearRect(0,0,canvas.width,canvas.height);
             const me = players[localPlayerId];
             ctx.save();
             let viewX = me && me.viewX ? me.viewX : GAME_WIDTH/2;
             let viewY = me && me.viewY ? me.viewY : GAME_HEIGHT/2;
-
             ctx.translate(canvas.width / 2, canvas.height / 2);
             ctx.scale(currentScale, currentScale);
             ctx.translate(-viewX, -viewY);
             
             const view = {left:viewX-(canvas.width/2/currentScale)-50, right:viewX+(canvas.width/2/currentScale)+50, top:viewY-(canvas.height/2/currentScale)-50, bottom:viewY+(canvas.height/2/currentScale)+50};
-
             drawGrid(view);
             drawMapBorder();
 
@@ -468,22 +402,13 @@
             if(isGameRunning) updateLeaderboard();
         }
 
-        function drawMapBorder() {
-            ctx.strokeStyle = '#aaaaaa';
-            ctx.lineWidth = 20;
-            ctx.strokeRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
-        }
+        function drawMapBorder() { ctx.strokeStyle = '#aaaaaa'; ctx.lineWidth = 20; ctx.strokeRect(0, 0, GAME_WIDTH, GAME_HEIGHT); }
         
         function split() {
             runTransaction(ref(db, `players/${localPlayerId}`), (playerData) => {
-                if (!playerData || !playerData.cells || Object.keys(playerData.cells).length >= 16) {
-                    return playerData;
-                }
-
+                if (!playerData || !playerData.cells || Object.keys(playerData.cells).length >= 16) return playerData;
                 const cellsToSplit = Object.values(playerData.cells).filter(c => c.size >= MIN_SPLIT_SIZE);
-                if (cellsToSplit.length === 0) {
-                    return playerData;
-                }
+                if (cellsToSplit.length === 0) return playerData;
 
                 cellsToSplit.forEach(cellToSplit => {
                     const originalCell = playerData.cells[cellToSplit.id];
@@ -491,28 +416,21 @@
 
                     const newSize = originalCell.size / Math.sqrt(2);
                     originalCell.size = newSize;
-
-                    const angle = Math.atan2(mouse.y - canvas.height / 2, mouse.x - canvas.width / 2);
+                    const angle = joystickAngle !== null ? joystickAngle : Math.atan2(mouse.y - canvas.height / 2, mouse.x - canvas.width / 2);
                     const newCellId = `cell_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-                    
                     let newX = originalCell.x + Math.cos(angle) * (newSize * 1.5);
                     let newY = originalCell.y + Math.sin(angle) * (newSize * 1.5);
-
                     newX = Math.max(newSize, Math.min(GAME_WIDTH - newSize, newX));
                     newY = Math.max(newSize, Math.min(GAME_HEIGHT - newSize, newY));
 
                     playerData.cells[newCellId] = {
-                        id: newCellId,
-                        x: newX,
-                        y: newY,
-                        size: newSize,
-                        vx: Math.cos(angle) * 25,
-                        vy: Math.sin(angle) * 25,
+                        id: newCellId, x: newX, y: newY, size: newSize,
+                        vx: Math.cos(angle) * 15, // MODIFIED: 분열 속도/거리 감소
+                        vy: Math.sin(angle) * 15,
                         mergeTime: Date.now() + MERGE_TIME
                     };
                     originalCell.mergeTime = Date.now() + MERGE_TIME;
                 });
-
                 return playerData;
             });
         }
@@ -522,11 +440,13 @@
             if (!me || !me.cells) return;
             const cellToEjectFrom = Object.values(me.cells).filter(c => c.size > MIN_EJECT_SIZE).sort((a, b) => b.size - a.size)[0];
             if (!cellToEjectFrom) return;
+            
+            const moveAngle = joystickAngle !== null ? joystickAngle : Math.atan2(mouse.y - canvas.height / 2, mouse.x - canvas.width / 2);
             let movementAngle;
             if (Math.hypot(cellToEjectFrom.vx, cellToEjectFrom.vy) > 0.1) {
                 movementAngle = Math.atan2(cellToEjectFrom.vy, cellToEjectFrom.vx);
             } else {
-                movementAngle = Math.atan2(mouse.y - canvas.height / 2, mouse.x - canvas.width / 2);
+                movementAngle = moveAngle;
             }
             const boostAmount = 3; 
             runTransaction(ref(db, `players/${localPlayerId}/cells/${cellToEjectFrom.id}`), (currentCell) => {
