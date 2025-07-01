@@ -24,7 +24,7 @@
 
         /* --- MOBILE CONTROLS CSS --- */
         #mobile-controls { display: none; } /* 기본 숨김 */
-        body.touch-device #mobile-controls { display: block; } /* 터치 기기에서만 보임 */
+        body.touch-device #mobile-controls { display: block; } /* JS가 터치 기기로 판단하면 보임 */
 
         .mobile-button { position: fixed; width: 65px; height: 65px; background-color: rgba(0, 0, 0, 0.4); border: 2px solid rgba(255, 255, 255, 0.5); border-radius: 50%; color: white; font-size: 16px; font-weight: bold; display: flex; justify-content: center; align-items: center; cursor: pointer; user-select: none; z-index: 20; }
         .mobile-button:active { background-color: rgba(0, 0, 0, 0.6); }
@@ -67,7 +67,7 @@
         import { initializeApp } from "https://www.gstatic.com/firebasejs/9.6.1/firebase-app.js";
         import { getDatabase, ref, set, onValue, onDisconnect, remove, runTransaction } from "https://www.gstatic.com/firebasejs/9.6.1/firebase-database.js";
 
-        // Firebase Config (Your config here)
+        // Firebase Config
         const firebaseConfig = {
           apiKey: "AIzaSyDEGeOQYpRA3NHmNFxh7wXGLnYF8mCNWpQ",
           authDomain: "agar-7f7ca.firebaseapp.com",
@@ -119,26 +119,26 @@
         let joystickAngle = null;
         let disconnectRef = null;
         let currentScale = 1;
-        let isTouchDevice = false;
-
+        
         // --- SETUP ---
-        function detectTouchDevice() {
+        function detectAndInitMobile() {
+            // MODIFIED: JS로 직접 터치 기기를 감지하여 버튼/조이스틱 표시
+            let isTouchDevice = false;
             try {
                 document.createEvent("TouchEvent");
                 isTouchDevice = true;
-                document.body.classList.add('touch-device');
             } catch (e) {
                 isTouchDevice = false;
             }
+            if (isTouchDevice) {
+                document.body.classList.add('touch-device');
+                const options = { zone: joystickZone, mode: 'static', position: { left: '75px', bottom: '75px' }, color: 'white' };
+                const manager = nipplejs.create(options);
+                manager.on('move', (evt, data) => { joystickAngle = data.angle.radian; });
+                manager.on('end', () => { joystickAngle = null; });
+            }
         }
-        
-        function initializeJoystick() {
-            if (!isTouchDevice) return;
-            const options = { zone: joystickZone, mode: 'static', position: { left: '75px', bottom: '75px' }, color: 'white' };
-            const manager = nipplejs.create(options);
-            manager.on('move', (evt, data) => { joystickAngle = data.angle.radian; });
-            manager.on('end', () => { joystickAngle = null; });
-        }
+        detectAndInitMobile();
 
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
@@ -158,10 +158,8 @@
             if (!playerName) { alert('닉네임을 입력해주세요!'); return; }
             localPlayerName = playerName;
             if (!hasInitialized) {
-                detectTouchDevice();
                 generateStaticFood();
                 setupFirebaseListeners();
-                initializeJoystick();
                 hasInitialized = true;
             }
             initializePlayer();
@@ -206,17 +204,43 @@
             return localPlayerId === Object.keys(players).sort()[0];
         }
 
+        // MODIFIED: 재결합 로직을 마스터 클라이언트가 총괄하도록 변경
         function runMasterClientTasks() {
             if (!isMasterClient()) return;
-            
+            const now = Date.now();
+
             if (Object.keys(viruses).length < VIRUS_COUNT) {
                 const newId = `virus_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
                 set(ref(db, `viruses/${newId}`), { x: Math.random() * GAME_WIDTH, y: Math.random() * GAME_HEIGHT, size: 80 });
             }
-            const now = Date.now();
             for (const massId in ejectedMass) {
                 if (now - (ejectedMass[massId].spawnTime || 0) > 20000) remove(ref(db, `ejectedMass/${massId}`));
             }
+
+            // 재결합 로직: 모든 플레이어의 세포를 확인하고 합침
+            runTransaction(ref(db, 'players'), (allPlayers) => {
+                if (!allPlayers) return allPlayers;
+                for(const pId in allPlayers) {
+                    const pData = allPlayers[pId];
+                    if (!pData.cells || Object.keys(pData.cells).length <= 1) continue;
+                    
+                    const cells = Object.values(pData.cells);
+                    for (let i = 0; i < cells.length; i++) {
+                        for (let j = i + 1; j < cells.length; j++) {
+                            const c1 = cells[i], c2 = cells[j];
+                            if (!c1 || !c2) continue;
+                            const readyToMerge = now > (c1.mergeTime || 0) && now > (c2.mergeTime || 0);
+                            if (readyToMerge && Math.hypot(c1.x - c2.x, c1.y - c2.y) < (c1.size + c2.size) / 2) {
+                                c1.size = Math.sqrt(c1.size**2 + c2.size**2);
+                                delete pData.cells[c2.id];
+                                cells.splice(j, 1);
+                                j--;
+                            }
+                        }
+                    }
+                }
+                return allPlayers;
+            });
         }
 
         function setupFirebaseListeners() {
@@ -230,7 +254,7 @@
             });
             onValue(ref(db, 'viruses'), (snapshot) => { viruses = snapshot.val() || {}; });
             onValue(ref(db, 'ejectedMass'), (snapshot) => { ejectedMass = snapshot.val() || {}; });
-            setInterval(runMasterClientTasks, 1000); // Master tasks don't need to run as fast
+            setInterval(runMasterClientTasks, 250);
         }
         
         function handleKeyDown(e) {
@@ -247,16 +271,14 @@
                 return;
             };
 
-            // Camera and Scale Calculation
             let totalSizeSq = 0, viewX = 0, viewY = 0;
-            for (const cellId in me.cells) {
-                const cell = me.cells[cellId];
+            Object.values(me.cells).forEach(cell => {
                 viewX += cell.x * cell.size;
                 viewY += cell.y * cell.size;
-                totalSizeSq += cell.size * cell.size;
-            }
+                totalSizeSq += cell.size**2;
+            });
             const totalSize = Math.sqrt(totalSizeSq);
-            let totalWeightedSize = Object.values(me.cells).reduce((sum, c) => sum + c.size, 0);
+            const totalWeightedSize = Object.values(me.cells).reduce((sum, c) => sum + c.size, 0);
             if (totalWeightedSize > 0) {
                  me.viewX = viewX / totalWeightedSize;
                  me.viewY = viewY / totalWeightedSize;
@@ -266,77 +288,28 @@
 
             const moveAngle = joystickAngle !== null ? joystickAngle : Math.atan2(mouse.y - canvas.height / 2, mouse.x - canvas.width / 2);
 
-            // Local movement simulation
-            for (const cellId in me.cells) {
-                const cell = me.cells[cellId];
+            Object.values(me.cells).forEach(cell => {
                 const speed = 4 / Math.log1p(cell.size);
                 let targetVX = Math.cos(moveAngle) * speed;
                 let targetVY = Math.sin(moveAngle) * speed;
-
-                if (Object.keys(me.cells).length > 1) {
-                    const distToCenter = Math.hypot(cell.x - me.viewX, cell.y - me.viewY);
-                    if (distToCenter > 1) {
-                        const angleToCenter = Math.atan2(me.viewY - cell.y, me.viewX - cell.x);
-                        targetVX += Math.cos(angleToCenter) * distToCenter * 0.01;
-                        targetVY += Math.sin(angleToCenter) * distToCenter * 0.01;
-                    }
-                }
-                
                 cell.vx = (cell.vx || 0) * FRICTION + targetVX * 0.1;
                 cell.vy = (cell.vy || 0) * FRICTION + targetVY * 0.1;
                 cell.x += cell.vx;
                 cell.y += cell.vy;
-
-                for (const otherId in me.cells) {
-                    if (cellId === otherId) continue;
-                    const otherCell = me.cells[otherId];
-                    const dist = Math.hypot(cell.x - otherCell.x, cell.y - otherCell.y);
-                    const minDist = (cell.size + otherCell.size) * 0.9;
-                    if (dist < minDist) {
-                        const angle = Math.atan2(cell.y - otherCell.y, cell.x - otherCell.x);
-                        const overlap = (minDist - dist) / 2;
-                        cell.x += Math.cos(angle) * overlap;
-                        cell.y += Math.sin(angle) * overlap;
-                    }
-                }
-
                 cell.x = Math.max(cell.size, Math.min(GAME_WIDTH - cell.size, cell.x));
                 cell.y = Math.max(cell.size, Math.min(GAME_HEIGHT - cell.size, cell.y));
-            }
+            });
             
             handleCollisions();
-            if (players[localPlayerId]) set(ref(db, 'players/' + localPlayerId), me);
+            if (players[localPlayerId]) set(ref(db, `players/${localPlayerId}/cells`), me.cells);
         }
         
         function handleCollisions() {
             const me = players[localPlayerId];
             if (!me || !me.cells) return;
 
-            // MODIFIED: Self-merge logic is now a transaction to guarantee it works.
-            runTransaction(ref(db, `players/${localPlayerId}`), (playerData) => {
-                if (!playerData || !playerData.cells || Object.keys(playerData.cells).length <= 1) return playerData;
-                const cells = Object.values(playerData.cells);
-                const now = Date.now();
-
-                for (let i = 0; i < cells.length; i++) {
-                    for (let j = i + 1; j < cells.length; j++) {
-                        const c1 = cells[i], c2 = cells[j];
-                        if (!c1 || !c2) continue;
-                        const readyToMerge = now > (c1.mergeTime || 0) && now > (c2.mergeTime || 0);
-                        if (readyToMerge && Math.hypot(c1.x - c2.x, c1.y - c2.y) < (c1.size + c2.size) / 2) {
-                            c1.size = Math.sqrt(c1.size**2 + c2.size**2);
-                            delete playerData.cells[c2.id];
-                            cells.splice(j, 1);
-                            j--;
-                        }
-                    }
-                }
-                return playerData;
-            });
-
-            for (const cellId in me.cells) {
-                const cell = me.cells[cellId];
-                if (!cell) continue;
+            // 먹이 충돌은 즉각적인 반응을 위해 클라이언트에서 처리
+            for (const cell of Object.values(me.cells)) {
                 for (let i = staticFood.length - 1; i >= 0; i--) {
                     if (Math.hypot(cell.x - staticFood[i].x, cell.y - staticFood[i].y) < cell.size) {
                         cell.size = Math.sqrt(cell.size**2 + staticFood[i].size**2);
@@ -351,6 +324,7 @@
                 }
             }
             
+            // 플레이어간 충돌은 트랜잭션으로 안전하게 처리
             for (const myCellId in me.cells) {
                 const myCell = me.cells[myCellId];
                 for (const otherPlayerId in players) {
@@ -424,8 +398,8 @@
 
                     playerData.cells[newCellId] = {
                         id: newCellId, x: newX, y: newY, size: newSize,
-                        vx: Math.cos(angle) * 8, // MODIFIED: 분열 속도/거리 감소
-                        vy: Math.sin(angle) * 8,
+                        vx: Math.cos(angle) * 10, // MODIFIED: 분열 속도/거리 감소
+                        vy: Math.sin(angle) * 10,
                         mergeTime: Date.now() + MERGE_TIME
                     };
                     originalCell.mergeTime = Date.now() + MERGE_TIME;
