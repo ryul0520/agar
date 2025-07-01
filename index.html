@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced Agar.io Clone</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #1a1a1a; }
+        canvas { display: block; background-color: #282828; }
+        .overlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 25px 45px; background-color: rgba(255, 255, 255, 0.95); border-radius: 15px; box-shadow: 0 5px 20px rgba(0,0,0,0.3); text-align: center; z-index: 10; }
+        .overlay h1 { margin-top: 0; color: #333; }
+        .overlay p { color: #555; margin-bottom: 20px; }
+        #player-name-input { padding: 12px; font-size: 16px; border: 1px solid #ccc; border-radius: 8px; margin-bottom: 20px; width: 220px; text-align: center; }
+        .action-button { padding: 12px 25px; font-size: 16px; color: white; background-color: #4CAF50; border: none; border-radius: 8px; cursor: pointer; transition: background-color 0.2s; }
+        .action-button:hover { background-color: #45a049; }
+        #leaderboard { position: absolute; top: 15px; right: 15px; width: 220px; background-color: rgba(0, 0, 0, 0.6); color: white; padding: 15px; border-radius: 10px; z-index: 5; }
+        #leaderboard h2 { margin: 0 0 10px 0; text-align: center; font-size: 20px; border-bottom: 1px solid #555; padding-bottom: 5px; }
+        #leaderboard ol { list-style-type: none; padding: 0; margin: 0; }
+        #leaderboard li { padding: 4px 0; font-size: 15px; transition: color 0.2s; }
+        .controls { margin-top: 20px; font-size: 14px; color: #666; }
+        .controls strong { color: #333; }
+    </style>
+</head>
+<body>
+
+    <div id="start-screen" class="overlay">
+        <h1>Advanced Agar.io</h1>
+        <p>더 똑똑하고, 더 빠르게 움직이세요!</p>
+        <input type="text" id="player-name-input" placeholder="닉네임을 입력하세요" maxlength="12">
+        <button id="start-button" class="action-button">게임 시작</button>
+        <div class="controls">
+            <strong>Space:</strong> 분열     <strong>W:</strong> 먹이 뱉기
+        </div>
+    </div>
+
+    <div id="death-screen" class="overlay" style="display: none;">
+        <h1>Game Over!</h1>
+        <p>당신의 최종 점수: <strong id="final-score">0</strong></p>
+        <button id="respawn-button" class="action-button">다시하기</button>
+    </div>
+
+    <div id="leaderboard" style="display: none;">
+        <h2>리더보드</h2>
+        <ol id="leaderboard-list"></ol>
+    </div>
+
+    <canvas id="game-canvas"></canvas>
+
+    <script type="module">
+        // Firebase SDK
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/9.6.1/firebase-app.js";
+        import { getDatabase, ref, set, onValue, onDisconnect, remove, runTransaction } from "https://www.gstatic.com/firebasejs/9.6.1/firebase-database.js";
+
+        // Firebase Config
+        const firebaseConfig = {
+          apiKey: "AIzaSyDEGeOQYpRA3NHmNFxh7wXGLnYF8mCNWpQ",
+          authDomain: "agar-7f7ca.firebaseapp.com",
+          projectId: "agar-7f7ca",
+          storageBucket: "agar-7f7ca.firebasestorage.app",
+          messagingSenderId: "546021611747",
+          appId: "1:546021611747:web:f972d6168bc6b121678dd6"
+        };
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+
+        // DOM Elements
+        const canvas = document.getElementById('game-canvas');
+        const ctx = canvas.getContext('2d');
+        const startScreen = document.getElementById('start-screen');
+        const deathScreen = document.getElementById('death-screen');
+        const playerNameInput = document.getElementById('player-name-input');
+        const startButton = document.getElementById('start-button');
+        const respawnButton = document.getElementById('respawn-button');
+        const leaderboard = document.getElementById('leaderboard');
+        const leaderboardList = document.getElementById('leaderboard-list');
+        const finalScoreEl = document.getElementById('final-score');
+
+        // Game Constants
+        const GAME_WIDTH = 7000;
+        const GAME_HEIGHT = 7000;
+        const STATIC_FOOD_COUNT = 3750; 
+        const VIRUS_COUNT = 10; // MODIFIED: 바이러스 개수 15 -> 10
+        const INITIAL_PLAYER_SIZE = 20;
+        const MIN_SPLIT_SIZE = 40;
+        const MIN_EJECT_SIZE = 30;
+        const EJECTED_MASS_SIZE = 12;
+        const MERGE_TIME = 10 * 1000;
+        const FRICTION = 0.97;
+
+        // Game State
+        let players = {};
+        let staticFood = [];
+        let ejectedMass = {};
+        let viruses = {};
+        let localPlayerId = null;
+        let localPlayerName = '';
+        let isGameRunning = false;
+        let hasInitialized = false;
+        let mouse = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+        let disconnectRef = null;
+        let currentScale = 1;
+
+        // Setup
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        window.addEventListener('resize', () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; });
+        window.addEventListener('mousemove', (event) => { mouse.x = event.clientX; mouse.y = event.clientY; });
+        window.addEventListener('keydown', handleKeyDown);
+
+        startButton.addEventListener('click', startGame);
+        respawnButton.addEventListener('click', respawn);
+        playerNameInput.addEventListener('keyup', (e) => { if (e.key === 'Enter') startGame(); });
+        
+        function startGame() {
+            const playerName = playerNameInput.value.trim();
+            if (!playerName) { alert('닉네임을 입력해주세요!'); return; }
+            localPlayerName = playerName;
+            if (!hasInitialized) {
+                generateStaticFood();
+                setupFirebaseListeners();
+                hasInitialized = true;
+            }
+            initializePlayer();
+        }
+
+        function generateStaticFood() {
+            staticFood = [];
+            for (let i = 0; i < STATIC_FOOD_COUNT; i++) {
+                staticFood.push({ x: Math.random() * GAME_WIDTH, y: Math.random() * GAME_HEIGHT, size: 7, color: getRandomColor(true) });
+            }
+        }
+
+        function respawn() { initializePlayer(); }
+        
+        function handleDeath(score) {
+            isGameRunning = false;
+            if (disconnectRef) { disconnectRef.cancel(); disconnectRef = null; }
+            remove(ref(db, 'players/' + localPlayerId));
+            localPlayerId = null;
+            deathScreen.style.display = 'block';
+            leaderboard.style.display = 'none';
+            finalScoreEl.textContent = score;
+        }
+
+        function initializePlayer() {
+            startScreen.style.display = 'none';
+            deathScreen.style.display = 'none';
+            leaderboard.style.display = 'block';
+            localPlayerId = `player_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+            
+            const cellId = `cell_${Date.now()}`;
+            const playerData = {
+                id: localPlayerId, name: localPlayerName, color: getRandomColor(),
+                cells: { [cellId]: { id: cellId, x: Math.random() * GAME_WIDTH, y: Math.random() * GAME_HEIGHT, size: INITIAL_PLAYER_SIZE, vx: 0, vy: 0 } }
+            };
+            const playerRef = ref(db, 'players/' + localPlayerId);
+            set(playerRef, playerData);
+            disconnectRef = onDisconnect(playerRef);
+            disconnectRef.remove();
+            isGameRunning = true;
+            gameLoop();
+        }
+        
+        function isMasterClient() {
+            if (!localPlayerId || !players || Object.keys(players).length === 0) return false;
+            return localPlayerId === Object.keys(players).sort()[0];
+        }
+
+        const generateInitialViruses = () => {
+            const data = {};
+            for (let i = 0; i < VIRUS_COUNT; i++) {
+                const id = `virus_${i}_${Date.now()}`;
+                data[id] = { x: Math.random() * GAME_WIDTH, y: Math.random() * GAME_HEIGHT, size: 80 };
+            }
+            set(ref(db, 'viruses'), data);
+        };
+
+        function runMasterClientTasks() {
+            if (!isMasterClient()) return;
+            if (Object.keys(viruses).length < VIRUS_COUNT) {
+                const newId = `virus_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+                set(ref(db, `viruses/${newId}`), { x: Math.random() * GAME_WIDTH, y: Math.random() * GAME_HEIGHT, size: 80 });
+            }
+            const now = Date.now();
+            for (const massId in ejectedMass) {
+                if (now - (ejectedMass[massId].spawnTime || 0) > 20000) {
+                    remove(ref(db, `ejectedMass/${massId}`));
+                }
+            }
+        }
+
+        function setupFirebaseListeners() {
+            onValue(ref(db, 'players'), (snapshot) => {
+                const serverPlayers = snapshot.val() || {};
+                if (isGameRunning && localPlayerId && !serverPlayers[localPlayerId]) {
+                    let finalScore = 0;
+                    if(players[localPlayerId] && players[localPlayerId].cells) {
+                         finalScore = Math.floor(Object.values(players[localPlayerId].cells).reduce((sum, cell) => sum + cell.size, 0));
+                    }
+                    handleDeath(finalScore);
+                }
+                players = serverPlayers;
+            });
+            onValue(ref(db, 'viruses'), (snapshot) => {
+                const data = snapshot.val();
+                if (data) { viruses = data; } 
+                else if (isMasterClient()) { generateInitialViruses(); }
+            });
+            onValue(ref(db, 'ejectedMass'), (snapshot) => { ejectedMass = snapshot.val() || {}; });
+            setInterval(runMasterClientTasks, 1000);
+        }
+        
+        function handleKeyDown(e) {
+            if (!isGameRunning || !localPlayerId || !players[localPlayerId]) return;
+            const me = players[localPlayerId];
+            if (!me || !me.cells) return;
+            if (e.code === 'Space' && Object.values(me.cells).some(c => c.size >= MIN_SPLIT_SIZE)) split();
+            if (e.code === 'KeyW' && Object.values(me.cells).some(c => c.size >= MIN_EJECT_SIZE)) ejectMass();
+        }
+
+        function update() {
+            if (!isGameRunning || !localPlayerId || !players[localPlayerId]) return;
+            const me = players[localPlayerId];
+            if (!me.cells) return;
+
+            let totalMass = 0, viewX = 0, viewY = 0;
+            const cellCount = Object.keys(me.cells).length;
+            if (cellCount === 0) return;
+
+            for (const cellId in me.cells) {
+                const cell = me.cells[cellId];
+                viewX += cell.x * cell.size;
+                viewY += cell.y * cell.size;
+                totalMass += cell.size * cell.size;
+            }
+            const averageSize = Math.sqrt(totalMass);
+            if (averageSize > 0) {
+                 me.viewX = viewX / (totalMass / averageSize);
+                 me.viewY = viewY / (totalMass / averageSize);
+            } else { return; }
+
+            const targetScale = Math.pow(Math.min(1, 60 / averageSize), 0.4);
+            currentScale += (targetScale - currentScale) * 0.1;
+
+            for (const cellId in me.cells) {
+                const cell = me.cells[cellId];
+                const angleToMouse = Math.atan2(mouse.y - canvas.height / 2, mouse.x - canvas.width / 2);
+                const speed = 4 / Math.log1p(cell.size);
+                
+                let targetVX = Math.cos(angleToMouse) * speed;
+                let targetVY = Math.sin(angleToMouse) * speed;
+
+                if (cellCount > 1) {
+                    const distToCenter = Math.hypot(cell.x - me.viewX, cell.y - me.viewY);
+                    if (distToCenter > 1) {
+                        const angleToCenter = Math.atan2(me.viewY - cell.y, me.viewX - cell.x);
+                        targetVX += Math.cos(angleToCenter) * distToCenter * 0.01;
+                        targetVY += Math.sin(angleToCenter) * distToCenter * 0.01;
+                    }
+                }
+                
+                cell.vx = (cell.vx || 0) * FRICTION + targetVX * 0.1;
+                cell.vy = (cell.vy || 0) * FRICTION + targetVY * 0.1;
+                cell.x += cell.vx;
+                cell.y += cell.vy;
+
+                for (const otherId in me.cells) {
+                    if (cellId === otherId) continue;
+                    const otherCell = me.cells[otherId];
+                    const dist = Math.hypot(cell.x - otherCell.x, cell.y - otherCell.y);
+                    const minDist = (cell.size + otherCell.size) * 0.9;
+                    if (dist < minDist) {
+                        const angle = Math.atan2(cell.y - otherCell.y, cell.x - otherCell.x);
+                        const overlap = (minDist - dist) / 2;
+                        cell.x += Math.cos(angle) * overlap;
+                        cell.y += Math.sin(angle) * overlap;
+                    }
+                }
+
+                if (isNaN(cell.x) || isNaN(cell.y)) { cell.x = me.viewX; cell.y = me.viewY; cell.vx = 0; cell.vy = 0; }
+                cell.x = Math.max(cell.size, Math.min(GAME_WIDTH - cell.size, cell.x));
+                cell.y = Math.max(cell.size, Math.min(GAME_HEIGHT - cell.size, cell.y));
+            }
+            
+            handleCollisions(me);
+            set(ref(db, 'players/' + localPlayerId), me);
+        }
+        
+        function handleCollisions(me) {
+            let cellsToAdd = {};
+            let cellsToRemove = [];
+            let virusesToRemove = [];
+
+            const myCells = Object.values(me.cells);
+             for (let i = 0; i < myCells.length; i++) {
+                 for (let j = i + 1; j < myCells.length; j++) {
+                     const c1 = myCells[i], c2 = myCells[j];
+                     if (!c1 || !c2 || !(Date.now() > (c1.mergeTime || 0) && Date.now() > (c2.mergeTime || 0))) continue;
+                     if (Math.hypot(c1.x - c2.x, c1.y - c2.y) < (c1.size + c2.size) / 2) {
+                         c1.size = Math.sqrt(c1.size**2 + c2.size**2);
+                         delete me.cells[c2.id];
+                         myCells.splice(j, 1); j--;
+                     }
+                 }
+             }
+
+            for (const cellId in me.cells) {
+                const cell = me.cells[cellId];
+                if (!cell) continue;
+
+                for (let i = staticFood.length - 1; i >= 0; i--) {
+                    const item = staticFood[i];
+                    if (Math.hypot(cell.x - item.x, cell.y - item.y) < cell.size) {
+                        cell.size = Math.sqrt(cell.size**2 + item.size**2);
+                        staticFood.splice(i, 1);
+                    }
+                }
+                
+                for (const id in ejectedMass) {
+                    const item = ejectedMass[id];
+                    if (Math.hypot(cell.x - item.x, cell.y - item.y) < cell.size) {
+                        cell.size = Math.sqrt(cell.size**2 + item.size**2);
+                        remove(ref(db, `ejectedMass/${id}`));
+                    }
+                }
+
+                for (const virusId in viruses) {
+                    const v = viruses[virusId];
+                    if (Math.hypot(cell.x - v.x, cell.y - v.y) < cell.size && cell.size > v.size * 1.1) {
+                        cellsToRemove.push(cell.id);
+                        virusesToRemove.push(virusId);
+                        const numPieces = Math.min(10, Math.floor(cell.size / 20));
+                        const pieceSize = cell.size / Math.sqrt(numPieces);
+                        for (let i = 0; i < numPieces; i++) {
+                            const angle = Math.random() * 2 * Math.PI;
+                            const newCellId = `cell_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+                            cellsToAdd[newCellId] = { id: newCellId, x: cell.x, y: cell.y, size: pieceSize, vx: Math.cos(angle) * 15, vy: Math.sin(angle) * 15, mergeTime: Date.now() + MERGE_TIME };
+                        }
+                        break;
+                    }
+                }
+
+                for (const pId in players) {
+                    if (pId === localPlayerId) continue;
+                    const otherPlayer = players[pId];
+                    for (const otherCellId in otherPlayer.cells) {
+                        const otherCell = otherPlayer.cells[otherCellId];
+                        if (Math.hypot(cell.x - otherCell.x, cell.y - otherCell.y) < cell.size && cell.size > otherCell.size * 1.1) {
+                            cell.size = Math.sqrt(cell.size**2 + otherCell.size**2);
+                            remove(ref(db, `players/${pId}/cells/${otherCellId}`));
+                        }
+                    }
+                }
+            }
+
+            if (cellsToRemove.length > 0) {
+                cellsToRemove.forEach(id => delete me.cells[id]);
+                Object.assign(me.cells, cellsToAdd);
+                virusesToRemove.forEach(id => {
+                    remove(ref(db, `viruses/${id}`));
+                });
+            }
+        }
+
+        function draw(){
+            ctx.clearRect(0,0,canvas.width,canvas.height);
+            const me = players[localPlayerId];
+            ctx.save();
+            let viewX = me && me.viewX ? me.viewX : GAME_WIDTH/2;
+            let viewY = me && me.viewY ? me.viewY : GAME_HEIGHT/2;
+
+            ctx.translate(canvas.width / 2, canvas.height / 2);
+            ctx.scale(currentScale, currentScale);
+            ctx.translate(-viewX, -viewY);
+            
+            const view = {left:viewX-(canvas.width/2/currentScale)-50, right:viewX+(canvas.width/2/currentScale)+50, top:viewY-(canvas.height/2/currentScale)-50, bottom:viewY+(canvas.height/2/currentScale)+50};
+
+            drawGrid(view);
+            drawMapBorder();
+
+            const visibleStaticFood = staticFood.filter(obj => obj.x > view.left && obj.x < view.right && obj.y > view.top && obj.y < view.bottom);
+            const allDynamicObjects = [...Object.values(ejectedMass).map(e=>({...e,type:'ejected'})), ...Object.values(viruses).map(v=>({...v,type:'virus'})), ...Object.values(players).flatMap(p=>Object.values(p.cells||{}).map(c=>({...c,type:'player',player:p})))];
+            const visibleDynamicObjects = allDynamicObjects.filter(obj=>obj.x+(obj.size||0)>view.left && obj.x-(obj.size||0)<view.right && obj.y+(obj.size||0)>view.top && obj.y-(obj.size||0)<view.bottom);
+            const allVisibleObjects = [...visibleStaticFood.map(f=>({...f,type:'food'})),...visibleDynamicObjects];
+            
+            allVisibleObjects.sort((a,b)=>a.size-b.size).forEach(obj=>{switch(obj.type){case'food':drawCircle(obj.x,obj.y,obj.size,obj.color);break;case'ejected':drawCircle(obj.x,obj.y,obj.size,obj.color,true);break;case'virus':drawVirus(obj.x,obj.y,obj.size);break;case'player':drawPlayerCell(obj);break}});
+
+            ctx.restore();
+            if(isGameRunning) updateLeaderboard();
+        }
+
+        function drawMapBorder() {
+            ctx.strokeStyle = '#aaaaaa';
+            ctx.lineWidth = 20;
+            ctx.strokeRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+        }
+        
+        function split() {runTransaction(ref(db,'players/'+localPlayerId),p=>{if(!p||!p.cells||Object.keys(p.cells).length>=16)return p;const t=Object.values(p.cells).filter(c=>c.size>=MIN_SPLIT_SIZE);if(t.length>0){p.totalSize=0;Object.values(p.cells).forEach(c=>p.totalSize+=c.size**2)}t.forEach(c=>{const o=p.cells[c.id];if(!o)return;o.size/=Math.sqrt(2);const n=`cell_${Date.now()}_${Math.random().toString(36).substr(2,5)}`,a=Math.atan2(mouse.y-canvas.height/2,mouse.x-canvas.width/2);let newX=o.x+Math.cos(a)*(o.size*1.5);let newY=o.y+Math.sin(a)*(o.size*1.5);newX=Math.max(o.size,Math.min(GAME_WIDTH-o.size,newX));newY=Math.max(o.size,Math.min(GAME_HEIGHT-o.size,newY));p.cells[n]={id:n,x:newX,y:newY,size:o.size,vx:Math.cos(a)*25,vy:Math.sin(a)*25,mergeTime:Date.now()+MERGE_TIME};o.mergeTime=Date.now()+MERGE_TIME});return p})}
+
+        function ejectMass() {
+            const me = players[localPlayerId];
+            if (!me || !me.cells) return;
+
+            const cellToEjectFrom = Object.values(me.cells)
+                .filter(c => c.size > MIN_EJECT_SIZE)
+                .sort((a, b) => b.size - a.size)[0];
+            
+            if (!cellToEjectFrom) return;
+
+            let movementAngle;
+            if (Math.hypot(cellToEjectFrom.vx, cellToEjectFrom.vy) > 0.1) {
+                movementAngle = Math.atan2(cellToEjectFrom.vy, cellToEjectFrom.vx);
+            } else {
+                movementAngle = Math.atan2(mouse.y - canvas.height / 2, mouse.x - canvas.width / 2);
+            }
+
+            const boostAmount = 3; // MODIFIED: 뱉을 때 받을 가속도 양 6 -> 3
+
+            runTransaction(ref(db, `players/${localPlayerId}/cells/${cellToEjectFrom.id}`), (currentCell) => {
+                if (currentCell && currentCell.size > MIN_EJECT_SIZE) {
+                    currentCell.size = Math.sqrt(Math.max(MIN_EJECT_SIZE**2 / 2, currentCell.size**2 - EJECTED_MASS_SIZE**2));
+                    currentCell.vx = (currentCell.vx || 0) + Math.cos(movementAngle) * boostAmount;
+                    currentCell.vy = (currentCell.vy || 0) + Math.sin(movementAngle) * boostAmount;
+                }
+                return currentCell;
+            });
+
+            const ejectAngle = movementAngle + Math.PI; 
+            const massId = `mass_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+            set(ref(db, `ejectedMass/${massId}`), {
+                id: massId,
+                x: cellToEjectFrom.x + Math.cos(ejectAngle) * (cellToEjectFrom.size + 10),
+                y: cellToEjectFrom.y + Math.sin(ejectAngle) * (cellToEjectFrom.size + 10),
+                size: EJECTED_MASS_SIZE,
+                color: me.color,
+                spawnTime: Date.now()
+            });
+        }
+
+        function drawGrid(view){ctx.strokeStyle='#3a3a3a';ctx.lineWidth=1;const g=100;const sX=Math.floor(view.left/g)*g,eX=Math.ceil(view.right/g)*g,sY=Math.floor(view.top/g)*g,eY=Math.ceil(view.bottom/g)*g;for(let x=sX;x<eX;x+=g){ctx.beginPath();ctx.moveTo(x,sY);ctx.lineTo(x,eY);ctx.stroke()}for(let y=sY;y<eY;y+=g){ctx.beginPath();ctx.moveTo(sX,y);ctx.lineTo(eX,y);ctx.stroke()}}
+        function drawCircle(x,y,s,c,b=false){ctx.beginPath();ctx.arc(x,y,s,0,Math.PI*2);ctx.fillStyle=c;ctx.fill();if(b){ctx.strokeStyle=shadeColor(c,-20);ctx.lineWidth=3;ctx.stroke()}}
+        function drawVirus(x,y,s){ctx.fillStyle='#32CD32';ctx.strokeStyle='#228B22';ctx.lineWidth=s*0.1;const p=20;ctx.beginPath();for(let i=0;i<p*2;i++){const r=i%2===0?s:s*0.85,a=i/p*Math.PI;ctx.lineTo(x+Math.cos(a)*r,y+Math.sin(a)*r)}ctx.closePath();ctx.fill();ctx.stroke()}
+        function drawPlayerCell(c){const p=c.player;ctx.beginPath();ctx.arc(c.x,c.y,c.size,0,Math.PI*2);ctx.fillStyle=p.color;ctx.fill();ctx.strokeStyle=shadeColor(p.color,-20);ctx.lineWidth=Math.max(2,c.size*0.05);ctx.stroke();const C=Object.values(p.cells||{});if(C.length>0&&c.id===C.sort((a,b)=>b.size-a.size)[0].id){const f=Math.max(16,c.size*0.3);ctx.font=`bold ${f}px sans-serif`;ctx.fillStyle='white';ctx.textAlign='center';ctx.textBaseline='middle';ctx.shadowColor='black';ctx.shadowBlur=5;ctx.fillText(p.name,c.x,c.y);ctx.shadowBlur=0}}
+        function updateLeaderboard(){const s=Object.values(players).map(p=>({...p,totalSize:Math.floor(Object.values(p.cells||{}).reduce((sum,c)=>sum+c.size**2,0))})).sort((a,b)=>b.totalSize-a.totalSize);leaderboardList.innerHTML='';s.slice(0,10).forEach((p,i)=>{const l=document.createElement('li');l.textContent=`${i+1}. ${p.name} (${Math.floor(Math.sqrt(p.totalSize))})`;if(p.id===localPlayerId){l.style.color='#4CAF50';l.style.fontWeight='bold'}leaderboardList.appendChild(l)})}
+        function gameLoop() {if(!isGameRunning)return;update();draw();requestAnimationFrame(gameLoop)}
+        function getRandomColor(p=false){const h=Math.floor(Math.random()*360),s=p?Math.floor(Math.random()*20)+70:Math.floor(Math.random()*30)+70,l=p?Math.floor(Math.random()*20)+60:Math.floor(Math.random()*20)+50;return`hsl(${h}, ${s}%, ${l}%)`}
+        function shadeColor(c,p){const m=c.match(/(\d+)/g);if(!m)return c;let[h,s,l]=m.map(Number);l=Math.max(0,Math.min(100,l+p));return`hsl(${h}, ${s}%, ${l}%)`}
+
+    </script>
+</body>
+</html>
