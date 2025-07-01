@@ -23,17 +23,15 @@
         .controls strong { color: #333; }
 
         /* --- MOBILE CONTROLS CSS --- */
-        #mobile-controls { display: none; }
+        #mobile-controls { display: none; } /* 기본 숨김 */
+        body.touch-device #mobile-controls { display: block; } /* 터치 기기에서만 보임 */
+
         .mobile-button { position: fixed; width: 65px; height: 65px; background-color: rgba(0, 0, 0, 0.4); border: 2px solid rgba(255, 255, 255, 0.5); border-radius: 50%; color: white; font-size: 16px; font-weight: bold; display: flex; justify-content: center; align-items: center; cursor: pointer; user-select: none; z-index: 20; }
         .mobile-button:active { background-color: rgba(0, 0, 0, 0.6); }
         #split-button { bottom: 90px; right: 25px; }
         #eject-button { bottom: 25px; right: 90px; }
-        
         #joystick-zone { position: fixed; bottom: 0; left: 0; width: 150px; height: 150px; z-index: 20; }
         
-        @media (hover: none) and (pointer: coarse) {
-            #mobile-controls { display: block; }
-        }
     </style>
 </head>
 <body>
@@ -118,11 +116,30 @@
         let isGameRunning = false;
         let hasInitialized = false;
         let mouse = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
-        let joystickAngle = null; // Joystick state
+        let joystickAngle = null;
         let disconnectRef = null;
         let currentScale = 1;
+        let isTouchDevice = false;
 
-        // Setup
+        // --- SETUP ---
+        function detectTouchDevice() {
+            try {
+                document.createEvent("TouchEvent");
+                isTouchDevice = true;
+                document.body.classList.add('touch-device');
+            } catch (e) {
+                isTouchDevice = false;
+            }
+        }
+        
+        function initializeJoystick() {
+            if (!isTouchDevice) return;
+            const options = { zone: joystickZone, mode: 'static', position: { left: '75px', bottom: '75px' }, color: 'white' };
+            const manager = nipplejs.create(options);
+            manager.on('move', (evt, data) => { joystickAngle = data.angle.radian; });
+            manager.on('end', () => { joystickAngle = null; });
+        }
+
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
         window.addEventListener('resize', () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; });
@@ -136,21 +153,15 @@
         respawnButton.addEventListener('click', respawn);
         playerNameInput.addEventListener('keyup', (e) => { if (e.key === 'Enter') startGame(); });
         
-        function initializeJoystick() {
-            const options = { zone: joystickZone, mode: 'static', position: { left: '75px', bottom: '75px' }, color: 'white' };
-            const manager = nipplejs.create(options);
-            manager.on('move', (evt, data) => { joystickAngle = data.angle.radian; });
-            manager.on('end', () => { joystickAngle = null; });
-        }
-
         function startGame() {
             const playerName = playerNameInput.value.trim();
             if (!playerName) { alert('닉네임을 입력해주세요!'); return; }
             localPlayerName = playerName;
             if (!hasInitialized) {
+                detectTouchDevice();
                 generateStaticFood();
                 setupFirebaseListeners();
-                initializeJoystick(); // Initialize joystick with other setup
+                initializeJoystick();
                 hasInitialized = true;
             }
             initializePlayer();
@@ -198,7 +209,6 @@
         function runMasterClientTasks() {
             if (!isMasterClient()) return;
             
-            // Virus & Ejected Mass Cleanup
             if (Object.keys(viruses).length < VIRUS_COUNT) {
                 const newId = `virus_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
                 set(ref(db, `viruses/${newId}`), { x: Math.random() * GAME_WIDTH, y: Math.random() * GAME_HEIGHT, size: 80 });
@@ -207,32 +217,6 @@
             for (const massId in ejectedMass) {
                 if (now - (ejectedMass[massId].spawnTime || 0) > 20000) remove(ref(db, `ejectedMass/${massId}`));
             }
-
-            // MODIFIED: Master Client is now responsible for merging ALL players' cells
-            runTransaction(ref(db, 'players'), (allPlayers) => {
-                if (!allPlayers) return allPlayers;
-                const now = Date.now();
-                for(const pId in allPlayers) {
-                    const pData = allPlayers[pId];
-                    if (!pData.cells || Object.keys(pData.cells).length <= 1) continue;
-                    
-                    const cells = Object.values(pData.cells);
-                    for (let i = 0; i < cells.length; i++) {
-                        for (let j = i + 1; j < cells.length; j++) {
-                            const c1 = cells[i], c2 = cells[j];
-                            if (!c1 || !c2) continue;
-                            const readyToMerge = now > (c1.mergeTime || 0) && now > (c2.mergeTime || 0);
-                            if (readyToMerge && Math.hypot(c1.x - c2.x, c1.y - c2.y) < (c1.size + c2.size) / 2) {
-                                c1.size = Math.sqrt(c1.size**2 + c2.size**2);
-                                delete pData.cells[c2.id];
-                                cells.splice(j, 1);
-                                j--;
-                            }
-                        }
-                    }
-                }
-                return allPlayers;
-            });
         }
 
         function setupFirebaseListeners() {
@@ -246,7 +230,7 @@
             });
             onValue(ref(db, 'viruses'), (snapshot) => { viruses = snapshot.val() || {}; });
             onValue(ref(db, 'ejectedMass'), (snapshot) => { ejectedMass = snapshot.val() || {}; });
-            setInterval(runMasterClientTasks, 250); // Run tasks more frequently for smoother merges
+            setInterval(runMasterClientTasks, 1000); // Master tasks don't need to run as fast
         }
         
         function handleKeyDown(e) {
@@ -263,8 +247,8 @@
                 return;
             };
 
+            // Camera and Scale Calculation
             let totalSizeSq = 0, viewX = 0, viewY = 0;
-            const cellCount = Object.keys(me.cells).length;
             for (const cellId in me.cells) {
                 const cell = me.cells[cellId];
                 viewX += cell.x * cell.size;
@@ -277,20 +261,19 @@
                  me.viewX = viewX / totalWeightedSize;
                  me.viewY = viewY / totalWeightedSize;
             } else { return; }
-
             const targetScale = Math.pow(Math.min(1, 60 / totalSize), 0.4);
             currentScale += (targetScale - currentScale) * 0.1;
 
-            // MODIFIED: Use joystick angle if available, otherwise use mouse
             const moveAngle = joystickAngle !== null ? joystickAngle : Math.atan2(mouse.y - canvas.height / 2, mouse.x - canvas.width / 2);
 
+            // Local movement simulation
             for (const cellId in me.cells) {
                 const cell = me.cells[cellId];
                 const speed = 4 / Math.log1p(cell.size);
                 let targetVX = Math.cos(moveAngle) * speed;
                 let targetVY = Math.sin(moveAngle) * speed;
 
-                if (cellCount > 1) {
+                if (Object.keys(me.cells).length > 1) {
                     const distToCenter = Math.hypot(cell.x - me.viewX, cell.y - me.viewY);
                     if (distToCenter > 1) {
                         const angleToCenter = Math.atan2(me.viewY - cell.y, me.viewX - cell.x);
@@ -329,37 +312,52 @@
             const me = players[localPlayerId];
             if (!me || !me.cells) return;
 
-            // Food and ejected mass collision (client-side for responsiveness)
+            // MODIFIED: Self-merge logic is now a transaction to guarantee it works.
+            runTransaction(ref(db, `players/${localPlayerId}`), (playerData) => {
+                if (!playerData || !playerData.cells || Object.keys(playerData.cells).length <= 1) return playerData;
+                const cells = Object.values(playerData.cells);
+                const now = Date.now();
+
+                for (let i = 0; i < cells.length; i++) {
+                    for (let j = i + 1; j < cells.length; j++) {
+                        const c1 = cells[i], c2 = cells[j];
+                        if (!c1 || !c2) continue;
+                        const readyToMerge = now > (c1.mergeTime || 0) && now > (c2.mergeTime || 0);
+                        if (readyToMerge && Math.hypot(c1.x - c2.x, c1.y - c2.y) < (c1.size + c2.size) / 2) {
+                            c1.size = Math.sqrt(c1.size**2 + c2.size**2);
+                            delete playerData.cells[c2.id];
+                            cells.splice(j, 1);
+                            j--;
+                        }
+                    }
+                }
+                return playerData;
+            });
+
             for (const cellId in me.cells) {
                 const cell = me.cells[cellId];
                 if (!cell) continue;
                 for (let i = staticFood.length - 1; i >= 0; i--) {
-                    const item = staticFood[i];
-                    if (Math.hypot(cell.x - item.x, cell.y - item.y) < cell.size) {
-                        cell.size = Math.sqrt(cell.size**2 + item.size**2);
+                    if (Math.hypot(cell.x - staticFood[i].x, cell.y - staticFood[i].y) < cell.size) {
+                        cell.size = Math.sqrt(cell.size**2 + staticFood[i].size**2);
                         staticFood.splice(i, 1);
                     }
                 }
                 for (const id in ejectedMass) {
-                    const item = ejectedMass[id];
-                    if (Math.hypot(cell.x - item.x, cell.y - item.y) < cell.size) {
-                        cell.size = Math.sqrt(cell.size**2 + item.size**2);
+                    if (Math.hypot(cell.x - ejectedMass[id].x, cell.y - ejectedMass[id].y) < cell.size) {
+                        cell.size = Math.sqrt(cell.size**2 + ejectedMass[id].size**2);
                         remove(ref(db, `ejectedMass/${id}`));
                     }
                 }
             }
             
-            // Player vs Player collision
             for (const myCellId in me.cells) {
                 const myCell = me.cells[myCellId];
                 for (const otherPlayerId in players) {
-                    if (otherPlayerId === localPlayerId) continue;
-                    const otherPlayer = players[otherPlayerId];
-                    if (!otherPlayer.cells) continue;
-                    for (const otherCellId in otherPlayer.cells) {
-                        const otherCell = otherPlayer.cells[otherCellId];
-                        const dist = Math.hypot(myCell.x - otherCell.x, myCell.y - otherCell.y);
-                        if (dist < myCell.size && myCell.size > otherCell.size * 1.1) {
+                    if (otherPlayerId === localPlayerId || !players[otherPlayerId].cells) continue;
+                    for (const otherCellId in players[otherPlayerId].cells) {
+                        const otherCell = players[otherPlayerId].cells[otherCellId];
+                        if (Math.hypot(myCell.x - otherCell.x, myCell.y - otherCell.y) < myCell.size && myCell.size > otherCell.size * 1.1) {
                             runTransaction(ref(db, 'players'), (allPlayers) => {
                                 if (!allPlayers) return allPlayers;
                                 const currentMe = allPlayers[localPlayerId];
@@ -381,8 +379,8 @@
             ctx.clearRect(0,0,canvas.width,canvas.height);
             const me = players[localPlayerId];
             ctx.save();
-            let viewX = me && me.viewX ? me.viewX : GAME_WIDTH/2;
-            let viewY = me && me.viewY ? me.viewY : GAME_HEIGHT/2;
+            let viewX = me?.viewX || GAME_WIDTH/2;
+            let viewY = me?.viewY || GAME_HEIGHT/2;
             ctx.translate(canvas.width / 2, canvas.height / 2);
             ctx.scale(currentScale, currentScale);
             ctx.translate(-viewX, -viewY);
@@ -391,10 +389,11 @@
             drawGrid(view);
             drawMapBorder();
 
-            const visibleStaticFood = staticFood.filter(obj => obj.x > view.left && obj.x < view.right && obj.y > view.top && obj.y < view.bottom);
             const allDynamicObjects = [...Object.values(ejectedMass).map(e=>({...e,type:'ejected'})), ...Object.values(viruses).map(v=>({...v,type:'virus'})), ...Object.values(players || {}).flatMap(p=>Object.values(p.cells||{}).map(c=>({...c,type:'player',player:p})))];
-            const visibleDynamicObjects = allDynamicObjects.filter(obj=>obj.x+(obj.size||0)>view.left && obj.x-(obj.size||0)<view.right && obj.y+(obj.size||0)>view.top && obj.y-(obj.size||0)<view.bottom);
-            const allVisibleObjects = [...visibleStaticFood.map(f=>({...f,type:'food'})),...visibleDynamicObjects];
+            const allVisibleObjects = [
+                ...staticFood.filter(obj => obj.x > view.left && obj.x < view.right && obj.y > view.top && obj.y < view.bottom).map(f=>({...f,type:'food'})),
+                ...allDynamicObjects.filter(obj=>obj.x+(obj.size||0)>view.left && obj.x-(obj.size||0)<view.right && obj.y+(obj.size||0)>view.top && obj.y-(obj.size||0)<view.bottom)
+            ];
             
             allVisibleObjects.sort((a,b)=>a.size-b.size).forEach(obj=>{switch(obj.type){case'food':drawCircle(obj.x,obj.y,obj.size,obj.color);break;case'ejected':drawCircle(obj.x,obj.y,obj.size,obj.color,true);break;case'virus':drawVirus(obj.x,obj.y,obj.size);break;case'player':drawPlayerCell(obj);break}});
 
@@ -425,8 +424,8 @@
 
                     playerData.cells[newCellId] = {
                         id: newCellId, x: newX, y: newY, size: newSize,
-                        vx: Math.cos(angle) * 15, // MODIFIED: 분열 속도/거리 감소
-                        vy: Math.sin(angle) * 15,
+                        vx: Math.cos(angle) * 8, // MODIFIED: 분열 속도/거리 감소
+                        vy: Math.sin(angle) * 8,
                         mergeTime: Date.now() + MERGE_TIME
                     };
                     originalCell.mergeTime = Date.now() + MERGE_TIME;
@@ -459,14 +458,7 @@
             });
             const ejectAngle = movementAngle + Math.PI; 
             const massId = `mass_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-            set(ref(db, `ejectedMass/${massId}`), {
-                id: massId,
-                x: cellToEjectFrom.x + Math.cos(ejectAngle) * (cellToEjectFrom.size + 10),
-                y: cellToEjectFrom.y + Math.sin(ejectAngle) * (cellToEjectFrom.size + 10),
-                size: EJECTED_MASS_SIZE,
-                color: me.color,
-                spawnTime: Date.now()
-            });
+            set(ref(db, `ejectedMass/${massId}`), { id: massId, x: cellToEjectFrom.x + Math.cos(ejectAngle) * (cellToEjectFrom.size + 10), y: cellToEjectFrom.y + Math.sin(ejectAngle) * (cellToEjectFrom.size + 10), size: EJECTED_MASS_SIZE, color: me.color, spawnTime: Date.now() });
         }
 
         function drawGrid(view){ctx.strokeStyle='#3a3a3a';ctx.lineWidth=1;const g=100;const sX=Math.floor(view.left/g)*g,eX=Math.ceil(view.right/g)*g,sY=Math.floor(view.top/g)*g,eY=Math.ceil(view.bottom/g)*g;for(let x=sX;x<eX;x+=g){ctx.beginPath();ctx.moveTo(x,sY);ctx.lineTo(x,eY);ctx.stroke()}for(let y=sY;y<eY;y+=g){ctx.beginPath();ctx.moveTo(sX,y);ctx.lineTo(eX,y);ctx.stroke()}}
