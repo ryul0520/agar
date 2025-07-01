@@ -14,7 +14,7 @@
         .overlay p { color: #555; margin-bottom: 20px; }
         #player-name-input { padding: 12px; font-size: 16px; border: 1px solid #ccc; border-radius: 8px; margin-bottom: 20px; width: 220px; text-align: center; }
         .action-button { padding: 12px 25px; font-size: 16px; color: white; background-color: #4CAF50; border: none; border-radius: 8px; cursor: pointer; transition: background-color 0.2s; }
-        #action-button:hover { background-color: #45a049; }
+        .action-button:hover { background-color: #45a049; }
         #leaderboard { position: absolute; top: 15px; right: 15px; width: 220px; background-color: rgba(0, 0, 0, 0.6); color: white; padding: 15px; border-radius: 10px; z-index: 5; }
         #leaderboard h2 { margin: 0 0 10px 0; text-align: center; font-size: 20px; border-bottom: 1px solid #555; padding-bottom: 5px; }
         #leaderboard ol { list-style-type: none; padding: 0; margin: 0; }
@@ -97,7 +97,7 @@
         const EJECTED_MASS_SIZE = 12;
         const MERGE_TIME = 15 * 1000;
         const FRICTION = 0.97;
-        const UPDATE_INTERVAL = 100; // 서버 업데이트 주기 (ms)
+        const UPDATE_INTERVAL = 100;
 
         let players = {};
         let staticFood = [];
@@ -191,81 +191,58 @@
         function runMasterClientTasks() {
             if (!isMasterClient()) return;
             const now = Date.now();
-
-            // 서버 데이터 업데이트 객체
+            let playersCopy = JSON.parse(JSON.stringify(players));
             const updates = {};
-            let playersCopy = JSON.parse(JSON.stringify(players)); // 원본 수정을 피하기 위한 깊은 복사
-
-            // 1. 재결합 로직
+            
             for (const pId in playersCopy) {
                 const pData = playersCopy[pId];
                 if (!pData.cells || Object.keys(pData.cells).length <= 1) continue;
-                
                 const cells = Object.values(pData.cells);
                 for (let i = 0; i < cells.length; i++) {
                     for (let j = i + 1; j < cells.length; j++) {
                         const c1 = cells[i], c2 = cells[j];
                         if (!c1 || !c2) continue;
-                        const readyToMerge = now > (c1.mergeTime || 0) && now > (c2.mergeTime || 0);
-                        if (readyToMerge && Math.hypot(c1.x - c2.x, c1.y - c2.y) < (c1.size + c2.size) / 2) {
+                        if (now > (c1.mergeTime || 0) && now > (c2.mergeTime || 0) && Math.hypot(c1.x - c2.x, c1.y - c2.y) < (c1.size + c2.size) / 2) {
                             c1.size = Math.sqrt(c1.size**2 + c2.size**2);
                             delete pData.cells[c2.id];
                             cells.splice(j, 1); j--;
                         }
                     }
                 }
-                updates[`/players/${pId}/cells`] = pData.cells;
             }
 
-            // 2. 플레이어간 충돌 로직
             const playerIds = Object.keys(playersCopy);
             for(let i = 0; i < playerIds.length; i++) {
                 for(let j = i + 1; j < playerIds.length; j++) {
-                    const p1Id = playerIds[i];
-                    const p2Id = playerIds[j];
-                    const p1 = playersCopy[p1Id];
-                    const p2 = playersCopy[p2Id];
-
-                    if(!p1 || !p1.cells || !p2 || !p2.cells) continue;
-                    
+                    const p1 = playersCopy[playerIds[i]], p2 = playersCopy[playerIds[j]];
+                    if(!p1?.cells || !p2?.cells) continue;
                     for(const c1Id in p1.cells) {
                         for(const c2Id in p2.cells) {
-                            const c1 = p1.cells[c1Id];
-                            const c2 = p2.cells[c2Id];
+                            const c1 = p1.cells[c1Id], c2 = p2.cells[c2Id];
                             if(!c1 || !c2) continue;
-
-                            const dist = Math.hypot(c1.x - c2.x, c1.y - c2.y);
-                            if (dist < c1.size && c1.size > c2.size * 1.1) {
-                                c1.size = Math.sqrt(c1.size**2 + c2.size**2);
-                                delete p2.cells[c2Id];
-                            } else if (dist < c2.size && c2.size > c1.size * 1.1) {
-                                c2.size = Math.sqrt(c2.size**2 + c1.size**2);
-                                delete p1.cells[c1Id];
+                            if (Math.hypot(c1.x - c2.x, c1.y - c2.y) < c1.size && c1.size > c2.size * 1.1) {
+                                c1.size = Math.sqrt(c1.size**2 + c2.size**2); delete p2.cells[c2Id];
+                            } else if (Math.hypot(c1.x - c2.x, c1.y - c2.y) < c2.size && c2.size > c1.size * 1.1) {
+                                c2.size = Math.sqrt(c2.size**2 + c1.size**2); delete p1.cells[c1Id];
                             }
                         }
                     }
                 }
             }
             
-            // 3. 변경사항 일괄 적용
             for(const pId in playersCopy){
-                const pData = playersCopy[pId];
-                if(Object.keys(pData.cells || {}).length === 0){
-                    updates[`/players/${pId}`] = null; // 플레이어 삭제
+                if(Object.keys(playersCopy[pId].cells || {}).length === 0){
+                    updates[`/players/${pId}`] = null;
                 } else {
-                    updates[`/players/${pId}/cells`] = pData.cells; // 셀 정보 업데이트
+                    updates[`/players/${pId}/cells`] = playersCopy[pId].cells;
                 }
             }
-
-            if (Object.keys(updates).length > 0) {
-                fbUpdate(ref(db), updates);
-            }
+            if (Object.keys(updates).length > 0) fbUpdate(ref(db), updates);
         }
 
         function setupFirebaseListeners() {
             onValue(ref(db, 'players'), (snapshot) => {
                 const serverPlayers = snapshot.val() || {};
-                // 서버에서 내 정보가 사라지면 죽은 것으로 간주
                 if (isGameRunning && localPlayerId && !serverPlayers[localPlayerId] && players[localPlayerId]) {
                     const finalScore = Math.floor(Object.values(players[localPlayerId].cells || {}).reduce((sum, cell) => sum + cell.size, 0));
                     handleDeath(finalScore);
@@ -275,37 +252,37 @@
             onValue(ref(db, 'viruses'), (snapshot) => { viruses = snapshot.val() || {}; });
             onValue(ref(db, 'ejectedMass'), (snapshot) => { ejectedMass = snapshot.val() || {}; });
             
-            setInterval(runMasterClientTasks, 200); // 마스터 클라이언트 역할 주기
-            setInterval(sendDataToServer, UPDATE_INTERVAL); // 내 위치 정보 전송 주기
+            setInterval(runMasterClientTasks, 200);
+            setInterval(sendDataToServer, UPDATE_INTERVAL);
         }
         
         function handleKeyDown(e) {
-            if (!isGameRunning || !localPlayerId || !players[localPlayerId] || !players[localPlayerId].cells) return;
+            if (!isGameRunning || !localPlayerId || !players[localPlayerId]?.cells) return;
             if (e.code === 'Space' && Object.values(players[localPlayerId].cells).some(c => c.size >= MIN_SPLIT_SIZE)) split();
             if (e.code === 'KeyW' && Object.values(players[localPlayerId].cells).some(c => c.size >= MIN_EJECT_SIZE)) ejectMass();
         }
 
-        // MODIFIED: 서버에 데이터 전송하는 로직을 분리하여 주기적으로 실행
+        // MODIFIED: 점수(크기)도 함께 서버에 전송하도록 수정
         function sendDataToServer() {
-            if (!isGameRunning || !localPlayerId || !players[localPlayerId]) return;
+            if (!isGameRunning || !localPlayerId || !players[localPlayerId]?.cells) return;
             const me = players[localPlayerId];
             const updates = {};
             for (const cellId in me.cells) {
-                updates[`/players/${localPlayerId}/cells/${cellId}/x`] = me.cells[cellId].x;
-                updates[`/players/${localPlayerId}/cells/${cellId}/y`] = me.cells[cellId].y;
+                const cell = me.cells[cellId];
+                updates[`/players/${localPlayerId}/cells/${cellId}/x`] = cell.x;
+                updates[`/players/${localPlayerId}/cells/${cellId}/y`] = cell.y;
+                updates[`/players/${localPlayerId}/cells/${cellId}/size`] = cell.size; // THE FIX
             }
             if (Object.keys(updates).length > 0) {
                 fbUpdate(ref(db), updates);
             }
         }
 
-        // MODIFIED: update 함수는 이제 로컬 시뮬레이션에만 집중
         function update() {
-            if (!isGameRunning || !localPlayerId || !players[localPlayerId] || !players[localPlayerId].cells) return;
+            if (!isGameRunning || !localPlayerId || !players[localPlayerId]?.cells) return;
             const me = players[localPlayerId];
             if (Object.keys(me.cells).length === 0) return;
 
-            // 로컬 카메라 계산 (서버에 보내지 않음)
             let totalSizeSq = 0, viewX = 0, viewY = 0;
             const myCells = Object.values(me.cells);
             myCells.forEach(cell => {
@@ -324,11 +301,10 @@
 
             const moveAngle = joystickAngle !== null ? joystickAngle : Math.atan2(mouse.y - canvas.height / 2, mouse.x - canvas.width / 2);
 
-            // 로컬 이동 계산
             myCells.forEach(cell => {
                 const speed = 5 / Math.log1p(cell.size);
-                let targetVX = Math.cos(moveAngle) * speed;
-                let targetVY = Math.sin(moveAngle) * speed;
+                const targetVX = Math.cos(moveAngle) * speed;
+                const targetVY = Math.sin(moveAngle) * speed;
                 cell.vx = (cell.vx || 0) * FRICTION + targetVX * 0.1;
                 cell.vy = (cell.vy || 0) * FRICTION + targetVY * 0.1;
                 cell.x += cell.vx;
@@ -337,7 +313,7 @@
                 cell.y = Math.max(cell.size, Math.min(GAME_HEIGHT - cell.size, cell.y));
             });
 
-            // 먹이 충돌은 로컬에서 즉시 처리
+            // 먹이 충돌은 로컬에서 즉시 처리 (서버 전송은 sendDataToServer가 담당)
             for (const cell of myCells) {
                 for (let i = staticFood.length - 1; i >= 0; i--) {
                     if (Math.hypot(cell.x - staticFood[i].x, cell.y - staticFood[i].y) < cell.size) {
@@ -415,7 +391,6 @@
             const ejectAngle = moveAngle + Math.PI; 
             const massId = `mass_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
             set(ref(db, `ejectedMass/${massId}`), { id: massId, x: cellToEjectFrom.x + Math.cos(ejectAngle) * (cellToEjectFrom.size + 10), y: cellToEjectFrom.y + Math.sin(ejectAngle) * (cellToEjectFrom.size + 10), size: EJECTED_MASS_SIZE, color: me.color, spawnTime: Date.now() });
-            
             runTransaction(ref(db, `players/${localPlayerId}/cells/${cellToEjectFrom.id}`), (currentCell) => {
                 if (currentCell && currentCell.size > MIN_EJECT_SIZE) {
                     currentCell.size = Math.sqrt(Math.max(MIN_EJECT_SIZE**2 / 2, currentCell.size**2 - EJECTED_MASS_SIZE**2));
